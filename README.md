@@ -5,34 +5,38 @@ There are three main methods:
 
 1) The aggregation
 ```
-// returns the aggregated key, as well as all the keys in the tree of radix 4
-// the tree keys contain all the original keys at the beginning of the vector, but sorted
-pub fn merkelized_key_aggregation(pubkeys: Vec<PublicKey>) -> (PublicKey, Vec<PublicKey>) 
+//returns the aggregated key and the map node.idx->key
+pub fn generate_tree_keys(
+    pubkeys: &Vec<PublicKey>,
+) -> Result<(PublicKey, HashMap<usize, PublicKey>), String>  
 ```
+Internally it uses ark::tree::Tree to structure the aggregation
+
 2) The proof
 ```
-// hopefully returns the Merkle proof of the pk participation in the aggregation of pkleaves
-pub fn generate_inclusion_proof(
+//if successful, the proof is a vector of public keys: first the root, then the sibling of each level
+//assumptions: only the root and the leaves can have less than 4 children
+pub fn generate_simple_proof(
     pk: PublicKey,
     pkleaves: Vec<PublicKey>,
-) -> Result<InclusionProof, String>
+) -> Result<Vec<PublicKey>, String>
 ```
-where the ```InclusionProof``` contains the proof tree and the leaf- and intermediate keys (this would be simple if I have included the keys in tree nodes as members, but this is not the case)
+The proof is a vector of public keys. The first key is the key that goes into the aggregation (a leaf key). 
+The last key is the aggregated key.
+
+
+3) The proof verification. 
 ```
-pub struct InclusionProof {
-    tree: Tree,
-    keys: Vec<PublicKey>,
-}
-```
-4) The proof verification. 
-```
-// returns true if the leaf_key is included in the proof leaves (of which there are up to 4),
-// and if the tree evaluation is equal to the root_key
-pub fn verify_inclusion_proof(
+//verifies that
+//a. the proof starts with the leaf_key provided,
+//b. processing the first len-1 keys in the proof generated the last one,
+//c. and that the last key is equal to the root provided
+pub fn verify_simple_proof(
     leaf_key: &PublicKey,
     root_key: &PublicKey,
-    proof: InclusionProof,
-) -> bool
+    proof: Vec<PublicKey>,
+) -> Result<(), String> 
 ´´´
+There is redundancy, ofc. 
 
 
