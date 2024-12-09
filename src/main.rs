@@ -3,6 +3,9 @@ use secp256k1_zkp::{MusigKeyAggCache, PublicKey, Secp256k1};
 use std::collections::HashMap;
 use std::vec;
 
+mod funpart;
+mod mmusig;
+
 static SECP: Lazy<Secp256k1<secp256k1_zkp::All>> = Lazy::new(Secp256k1::new);
 
 pub fn main() {
@@ -189,6 +192,30 @@ mod test {
             println!("Error generating {} keys", errcount);
         }
         pubkeys
+    }
+
+    #[test]
+    fn test_gen_keys() {
+        let keys = generate_test_keys(4, 42);
+
+        for key in keys.iter() {
+            println!(
+                "{:?}",
+                key.serialize()
+                    .iter()
+                    .map(|x| format!("{:02x}", x))
+                    .collect::<String>()
+            );
+        }
+        let msig = key_agg(keys);
+        println!(
+            "{:?}",
+            msig.agg_pk_full()
+                .serialize()
+                .iter()
+                .map(|x| format!("{:02x}", x))
+                .collect::<String>()
+        );
     }
 
     //Test generate_simple_proof()
