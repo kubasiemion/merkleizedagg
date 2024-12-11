@@ -11,7 +11,8 @@ use secp256kfun::{
     rand_core::{RngCore, SeedableRng},
     s, KeyPair, Point, Scalar, G,
 };
-use std::collections::HashMap;
+
+use std::vec;
 // The MuSig context.
 pub struct MuSig<H, NG> {
     /// The hash used to compress the key list to 32 bytes.
@@ -98,11 +99,13 @@ pub struct AggKey<T> {
     /// The tweak on the aggregate key
     tweak: Scalar<Public, Zero>,
 
-    treekeys: Option<HashMap<usize, Point<Normal>>>,
+    unsort: Vec<usize>,
 
-    treecoefs: Option<HashMap<usize, Scalar<Public>>>,
+    treekeys: Option<Vec<Point<Normal>>>,
 
-    treecumulcoefs: Option<HashMap<usize, Scalar<Public>>>,
+    treecoefs: Option<Vec<Scalar<Public>>>,
+
+    treecumulcoefs: Option<Vec<Scalar<Public>>>,
 }
 
 impl<T: Copy> AggKey<T> {
@@ -126,16 +129,26 @@ impl<T: Copy> AggKey<T> {
         self.coefs.clone()
     }
 
-    pub fn get_treekeys(&self) -> Option<HashMap<usize, Point<Normal>>> {
+    pub fn get_treekeys(&self) -> Option<Vec<Point<Normal>>> {
         self.treekeys.clone()
     }
 
-    pub fn get_treecoefs(&self) -> Option<HashMap<usize, Scalar<Public>>> {
+    pub fn get_treecoefs(&self) -> Option<Vec<Scalar<Public>>> {
         self.treecoefs.clone()
     }
 
-    pub fn get_treecumulcoefs(&self) -> Option<HashMap<usize, Scalar<Public>>> {
+    pub fn get_treecumulcoefs(&self) -> Option<Vec<Scalar<Public>>> {
         self.treecumulcoefs.clone()
+    }
+
+    pub fn key_index(&self, key: &Point) -> Option<usize> {
+        self.keys.iter().position(|k| k == key)
+    }
+
+    pub fn unsort(&self, s: usize) -> Result<&usize, String> {
+        self.unsort
+            .get(s)
+            .ok_or_else(|| "Index out of bounds".to_string())
     }
 
     //Public key participation proof - maybe it belongs to <Normal>?
@@ -146,11 +159,6 @@ impl<T: Copy> AggKey<T> {
             return Err("Not a merkleized aggregation".to_string());
         }
         let treekeys = self.treekeys.as_ref().unwrap();
-        let treecoefs = self.treecoefs.as_ref().expect("treecoefs not found");
-        let treecumulcoefs = self
-            .treecumulcoefs
-            .as_ref()
-            .expect("treecumulcoefs not found");
         match self.keys.len() {
             0 => return Err("No keys to generate proof".to_string()),
             1 => {
@@ -183,7 +191,7 @@ impl<T: Copy> AggKey<T> {
             for (childidx, cix) in node.children().enumerate() {
                 if let Some((_, sibling_idx)) = pix {
                     if sibling_idx != childidx {
-                        proof.push(treekeys[&cix].clone()); // Collect sibling key
+                        proof.push(treekeys[cix].clone()); // Collect sibling key
                     }
                 }
             }
@@ -195,7 +203,7 @@ impl<T: Copy> AggKey<T> {
                 break;
             }
         }
-        let rootkey = treekeys[&tree.root().idx()].clone();
+        let rootkey = treekeys[tree.root().idx()].clone();
 
         proof.push(rootkey);
         return Ok(proof);
@@ -222,6 +230,7 @@ impl AggKey<Normal> {
             treekeys: None,
             treecoefs: None,
             treecumulcoefs: None,
+            unsort: self.unsort,
         }
     }
 
@@ -254,6 +263,7 @@ impl AggKey<Normal> {
             treekeys: self.treekeys,
             treecoefs: self.treecoefs,
             treecumulcoefs: self.treecumulcoefs,
+            unsort: self.unsort,
         })
     }
 }
@@ -285,6 +295,7 @@ impl AggKey<EvenY> {
             treekeys: self.treekeys,
             treecoefs: self.treecoefs,
             treecumulcoefs: self.treecumulcoefs,
+            unsort: self.unsort,
         })
     }
 }
@@ -347,6 +358,7 @@ impl<H: Digest<OutputSize = U32> + Clone, NG> MuSig<H, NG> {
             treekeys: None,
             treecoefs: None,
             treecumulcoefs: None,
+            unsort: Vec::new(),
         }
     }
 
@@ -354,22 +366,32 @@ impl<H: Digest<OutputSize = U32> + Clone, NG> MuSig<H, NG> {
         if keys.len() <= 4 {
             return self.new_agg_key(keys);
         }
+        //We sort the keys at the beginning
+        let mut unsort: Vec<_> = (0..keys.len()).collect();
+        unsort.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
+        let mut unsort: Vec<_> = unsort.into_iter().enumerate().collect();
+        unsort.sort_by_key(|&(_, i)| i);
+        let unsort = unsort.into_iter().map(|(i, _)| i).collect::<Vec<_>>();
+
+        let mut keys = keys.clone();
+        keys.sort();
 
         let tree = ark::tree::Tree::new(keys.len());
 
         //calculate all partial coefficients
-        let mut treekeys: HashMap<usize, Point<Normal>> =
-            keys.iter().map(|key| key.clone()).enumerate().collect();
-        let mut treecoefs = HashMap::new();
+        let mut treekeys: Vec<Point<Normal>> = keys.iter().map(|key| key.clone()).collect();
+        treekeys.resize(tree.nb_nodes(), Point::generator());
+        let mut treecoefs = vec![Scalar::one(); tree.nb_nodes()];
         let agg_key = recursive_key_aggregation(&tree, tree.root(), &mut treekeys, &mut treecoefs)
-            .expect("computationally unreachable: all keys are valid");
+            .expect("we should not be here...");
 
         //calculate cumolative coefficients
-        let mut cumulcoefs: HashMap<usize, Scalar<Public>> = HashMap::new();
+        //let mut cumulcoefs: HashMap<usize, Scalar<Public>> = HashMap::new();
+        let mut cumulcoefs = vec![Scalar::one(); treekeys.len()];
         recursive_coef_cumulation(&tree, tree.root(), &treecoefs, &mut cumulcoefs);
         let mut coefs: Vec<Scalar<Public>> = Vec::new();
         for i in 0..keys.len() {
-            coefs.push(cumulcoefs.get(&i).unwrap().clone());
+            coefs.push(cumulcoefs.get(i).unwrap().clone());
         }
 
         AggKey {
@@ -381,6 +403,7 @@ impl<H: Digest<OutputSize = U32> + Clone, NG> MuSig<H, NG> {
             treekeys: Some(treekeys),
             treecoefs: Some(treecoefs),
             treecumulcoefs: Some(cumulcoefs),
+            unsort,
         }
     }
 }
@@ -482,18 +505,18 @@ pub fn verify_simple_proof(
 fn recursive_coef_cumulation(
     tree: &ark::tree::Tree,
     node: &ark::tree::Node,
-    coefs: &HashMap<usize, Scalar<Public>>,
-    cumulcoefs: &mut HashMap<usize, Scalar<Public>>,
+    coefs: &Vec<Scalar<Public>>,
+    cumulcoefs: &mut Vec<Scalar<Public>>,
 ) {
     if node.is_root() {
         cumulcoefs.insert(node.idx(), Scalar::one());
     }
     for child in node.children() {
-        let a = cumulcoefs.get(&node.idx()).unwrap();
-        let b = coefs.get(&child).unwrap();
+        let a = cumulcoefs.get(node.idx()).unwrap();
+        let b = coefs.get(child).unwrap();
         let c = op::scalar_mul(a, b);
         let c = c.set_secrecy::<Public>();
-        cumulcoefs.insert(child, c);
+        cumulcoefs[child] = c; //.insert(child, c);
         let child_node = get_node_hack(tree, child);
         recursive_coef_cumulation(tree, child_node, coefs, cumulcoefs);
     }
@@ -502,26 +525,20 @@ fn recursive_coef_cumulation(
 fn recursive_key_aggregation(
     tree: &ark::tree::Tree,
     node: &ark::tree::Node,
-    leaf_keys: &mut HashMap<usize, Point<Normal>>,
-    coeffs: &mut HashMap<usize, Scalar<Public>>,
+    tree_keys: &mut Vec<Point<Normal>>,
+    tree_coeffs: &mut Vec<Scalar<Public>>,
 ) -> Result<Point<Normal>, String> {
-    let iskey = leaf_keys.get(&node.idx());
+    let iskey = tree_keys.get(node.idx());
     if node.is_leaf() {
-        let key = leaf_keys.get(&node.idx()).expect("Key not found");
+        let key = tree_keys.get(node.idx()).expect("Key not found");
         return Ok(key.clone());
-    }
-    if iskey.is_some() {
-        println!(
-            "Key already found at {:?}. This should not have happened...",
-            node.idx()
-        );
     }
 
     // Collect aggregated keys from child nodes
     let mut sibling_keys = Vec::<Point>::new();
     for child in node.children() {
         let child_node = get_node_hack(tree, child);
-        let rkey = recursive_key_aggregation(tree, child_node, leaf_keys, coeffs);
+        let rkey = recursive_key_aggregation(tree, child_node, tree_keys, tree_coeffs);
         if let Ok(key) = rkey {
             sibling_keys.push(key);
         } else {
@@ -533,19 +550,21 @@ fn recursive_key_aggregation(
     let (node_key, coefs) = agg_keys(&sibling_keys);
 
     // Store the aggregated key in leaf_keys and return it
-    leaf_keys.insert(node.idx(), node_key.clone());
+    tree_keys[node.idx()] = node_key.clone();
 
     // Store the coefficients in the coefficients map
     for (i, coef) in coefs.iter().enumerate() {
-        coeffs.insert(node.children().nth(i).unwrap(), coef.clone());
+        tree_coeffs[node.children().nth(i).unwrap()] = coef.clone();
     }
     if node.is_root() {
-        coeffs.insert(node.idx(), Scalar::one());
+        //tree_coeffs.insert(node.idx(), Scalar::one());
+        //Already set to 1
     }
 
     Ok(node_key)
 }
 
+//Sorts and aggregates the keys, returns the coefficients in the order of the input keys
 fn agg_keys(keys: &Vec<Point>) -> (Point<Normal>, Vec<Scalar<Public>>) {
     let musig = self::new_with_deterministic_nonces::<sha2::Sha256>();
     let mut mkeys = keys.clone();
